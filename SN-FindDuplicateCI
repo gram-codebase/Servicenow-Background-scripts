@@ -1,0 +1,14 @@
+var dupMap = {};
+
+var ci = new GlideRecord('cmdb_ci');
+ci.query();
+
+while (ci.next()) {
+    var name = ci.name.toString();
+
+    if (dupMap[name]) {
+        gs.print('Duplicate CI: ' + name + ' | Sys ID: ' + ci.sys_id);
+    } else {
+        dupMap[name] = true;
+    }
+}
