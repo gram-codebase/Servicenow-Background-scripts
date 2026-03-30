@@ -1,0 +1,166 @@
+(function() {
+
+    var TASK_NUMBER = ''; // CHANGE THIS WITH THE TASK NUMBER WHICH YOU WANT TO FETCH THE LOGS FOR
+
+    var result = {};
+
+    // -----------------------------------------
+    // 1. GET TASK
+    // -----------------------------------------
+    var taskGR = new GlideRecord('task');
+    taskGR.addQuery('number', TASK_NUMBER);
+    taskGR.query();
+
+    if (!taskGR.next()) {
+        gs.print('❌ Task not found');
+        return;
+    }
+
+    var sysId = taskGR.getUniqueValue();
+    var tableName = taskGR.getTableName();
+
+    gs.print('✅ Found Task: ' + TASK_NUMBER + ' (' + sysId + ')');
+
+    // -----------------------------------------
+    // 2. EVENTS (CORRECT)
+    // -----------------------------------------
+    var events = [];
+    var eventGR = new GlideRecord('sysevent');
+    eventGR.addQuery('instance', sysId);
+    eventGR.orderByDesc('sys_created_on');
+    eventGR.query();
+
+    while (eventGR.next()) {
+        events.push({
+            name: eventGR.name.toString(),
+            parm1: eventGR.parm1.toString(),
+            created: eventGR.sys_created_on.toString()
+        });
+    }
+
+    // -----------------------------------------
+    // 3. EMAILS (CORRECT)
+    // -----------------------------------------
+    var emails = [];
+    var emailGR = new GlideRecord('sys_email');
+    emailGR.addQuery('instance', sysId);
+    emailGR.orderByDesc('sys_created_on');
+    emailGR.query();
+
+    while (emailGR.next()) {
+        emails.push({
+            subject: emailGR.subject.toString(),
+            recipients: emailGR.recipients.toString(),
+            type: emailGR.type.toString(),
+            state: emailGR.state.toString(),
+            created: emailGR.sys_created_on.toString()
+        });
+    }
+
+    // -----------------------------------------
+    // 4. FLOW EXECUTIONS (CORRECT)
+    // -----------------------------------------
+    var flows = [];
+    var flowGR = new GlideRecord('sys_flow_context');
+    flowGR.addQuery('source_record', sysId);
+    flowGR.orderByDesc('sys_created_on');
+    flowGR.query();
+
+    while (flowGR.next()) {
+        flows.push({
+            flow: flowGR.flow.toString(),
+            state: flowGR.state.toString(),
+            started: flowGR.sys_created_on.toString()
+        });
+    }
+
+    // -----------------------------------------
+    // 5. AUDIT (CORRECT)
+    // -----------------------------------------
+    var audit = [];
+    var auditGR = new GlideRecord('sys_audit');
+    auditGR.addQuery('documentkey', sysId);
+    auditGR.orderByDesc('sys_created_on');
+    auditGR.query();
+
+    while (auditGR.next()) {
+        audit.push({
+            field: auditGR.fieldname.toString(),
+            old: auditGR.oldvalue.toString(),
+            new_val: auditGR.newvalue.toString(),
+            user: auditGR.user.toString(),
+            time: auditGR.sys_created_on.toString()
+        });
+    }
+
+// -----------------------------------------
+// 6. PLAYBOOK EXECUTION (SAFE + CORRECT)
+// -----------------------------------------
+var playbooks = [];
+
+// Check if table exists in dictionary
+var tableCheck = new GlideRecord('sys_db_object');
+tableCheck.addQuery('name', 'sn_playbook_context');
+tableCheck.setLimit(1);
+tableCheck.query();
+
+if (tableCheck.next()) {
+
+    var pbGR = new GlideRecord('sn_playbook_context');
+    pbGR.addQuery('source_record', sysId);
+    pbGR.query();
+
+    while (pbGR.next()) {
+        playbooks.push({
+            playbook: pbGR.getDisplayValue('playbook'),
+            state: pbGR.getDisplayValue('state'),
+            started: pbGR.sys_created_on.toString()
+        });
+    }
+
+} else {
+    gs.print('⚠️ Playbook plugin not installed - skipping playbook logs');
+}
+
+    // -----------------------------------------
+    // 7. SYSLOG (SAFE APPROACH)
+    // -----------------------------------------
+    var logs = [];
+    var logGR = new GlideRecord('syslog');
+
+    // Use message search instead of invalid field
+    logGR.addQuery('message', 'CONTAINS', sysId);
+    logGR.orderByDesc('sys_created_on');
+    logGR.setLimit(50);
+    logGR.query();
+
+    while (logGR.next()) {
+        logs.push({
+            level: logGR.level.toString(),
+            message: logGR.message.toString(),
+            source: logGR.source.toString(),
+            created: logGR.sys_created_on.toString()
+        });
+    }
+
+    // -----------------------------------------
+    // FINAL OUTPUT
+    // -----------------------------------------
+    var finalOutput = {
+        task: {
+            number: TASK_NUMBER,
+            sys_id: sysId,
+            table: tableName
+        },
+        events: events,
+        emails: emails,
+        flows: flows,
+        audit: audit,
+        playbooks: playbooks,
+        logs: logs
+    };
+
+    gs.print('================ RESULT ================');
+    gs.print(JSON.stringify(finalOutput, null, 2));
+
+})();
