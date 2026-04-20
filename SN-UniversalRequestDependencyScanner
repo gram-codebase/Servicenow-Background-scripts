@@ -1,0 +1,524 @@
+(function () {
+
+    // ---------------------------------------------------------------
+    // Universal Request Dependency Scanner
+    //
+    // Identifies all tables, scripts, flows, actions, playbooks, and
+    // other platform artifacts tied to Universal Request, to support
+    // safe removal from the ITSM instance.
+    //
+    // Searches by application scope AND by name/table patterns so
+    // cross-scope customisations are also surfaced.
+    // ---------------------------------------------------------------
+
+    var report = {
+        scope:             {},
+        tables:            [],
+        apps_plugins:      [],
+        script_includes:   [],
+        business_rules:    [],
+        client_scripts:    [],
+        ui_policies:       [],
+        ui_actions:        [],
+        acls:              [],
+        flows:             [],
+        subflows:          [],
+        flow_actions:      [],
+        workflows:         [],
+        playbooks:         [],
+        notifications:     [],
+        inbound_email_actions: [],
+        scheduled_jobs:    [],
+        system_properties: [],
+        assignment_rules:  [],
+        catalog_items:     [],
+        warnings:          []
+    };
+
+    // ---------------------------------------------------------------
+    // Helper: does a table exist?
+    // ---------------------------------------------------------------
+    function tableExists(tableName) {
+        var chk = new GlideRecord('sys_db_object');
+        chk.addQuery('name', tableName);
+        chk.setLimit(1);
+        chk.query();
+        return chk.next();
+    }
+
+    // ---------------------------------------------------------------
+    // Helper: apply (scope OR name-pattern) query to a GlideRecord.
+    // nameField — the column that holds the artifact's own name.
+    // ---------------------------------------------------------------
+    function applyUrQuery(gr, scopeId, nameField) {
+        nameField = nameField || 'name';
+        var qc;
+        if (scopeId) {
+            qc = gr.addQuery('sys_scope', scopeId);
+            qc.addOrCondition(nameField, 'CONTAINS', 'universal_request');
+            qc.addOrCondition(nameField, 'CONTAINS', 'Universal Request');
+            qc.addOrCondition(nameField, 'CONTAINS', 'UniversalRequest');
+        } else {
+            qc = gr.addQuery(nameField, 'CONTAINS', 'universal_request');
+            qc.addOrCondition(nameField, 'CONTAINS', 'Universal Request');
+            qc.addOrCondition(nameField, 'CONTAINS', 'UniversalRequest');
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Helper: apply (scope OR table-pattern) query — used for artifacts
+    // whose link to UR is the table they operate on (BRs, client
+    // scripts, notifications, etc.), not their own name.
+    // ---------------------------------------------------------------
+    function applyUrTableQuery(gr, scopeId, tableField) {
+        tableField = tableField || 'table';
+        var qc;
+        if (scopeId) {
+            qc = gr.addQuery('sys_scope', scopeId);
+            qc.addOrCondition(tableField, 'CONTAINS', 'universal_request');
+            qc.addOrCondition(tableField, 'CONTAINS', 'sn_uni_req');
+        } else {
+            qc = gr.addQuery(tableField, 'CONTAINS', 'universal_request');
+            qc.addOrCondition(tableField, 'CONTAINS', 'sn_uni_req');
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 1. FIND APPLICATION SCOPE
+    // Universal Request ships as scope "sn_uni_req"; some older
+    // instances may use a different identifier — we match by name
+    // as a fallback.
+    // ---------------------------------------------------------------
+    gs.print('--- Discovering Universal Request application scope...');
+    var scopeGR = new GlideRecord('sys_scope');
+    var scopeQ = scopeGR.addQuery('scope', 'sn_uni_req');
+    scopeQ.addOrCondition('name', 'CONTAINS', 'Universal Request');
+    scopeGR.setLimit(1);
+    scopeGR.query();
+
+    var urScopeId = '';
+    if (scopeGR.next()) {
+        urScopeId = scopeGR.getUniqueValue();
+        report.scope = {
+            sys_id:  urScopeId,
+            name:    scopeGR.name.toString(),
+            scope:   scopeGR.scope.toString(),
+            version: scopeGR.version.toString()
+        };
+        gs.print('✅ Scope found: ' + scopeGR.name.toString() + ' [' + scopeGR.scope.toString() + ']');
+    } else {
+        gs.print('⚠️  Scope not found — falling back to name-pattern search only.');
+        report.warnings.push('Universal Request application scope not found on this instance.');
+    }
+
+    // ---------------------------------------------------------------
+    // 2. TABLES
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning tables...');
+    var tableGR = new GlideRecord('sys_db_object');
+    var tableQ = tableGR.addQuery('name', 'CONTAINS', 'universal_request');
+    tableQ.addOrCondition('name', 'CONTAINS', 'sn_uni_req');
+    if (urScopeId) {
+        tableQ.addOrCondition('sys_scope', urScopeId);
+    }
+    tableGR.orderBy('name');
+    tableGR.query();
+    while (tableGR.next()) {
+        report.tables.push({
+            name:          tableGR.name.toString(),
+            label:         tableGR.label.toString(),
+            extends_table: tableGR.super_class.getDisplayValue(),
+            scope:         tableGR.sys_scope.getDisplayValue(),
+            is_extendable: tableGR.is_extendable.toString()
+        });
+    }
+    gs.print('✅ Tables: ' + report.tables.length);
+
+    // ---------------------------------------------------------------
+    // 3. INSTALLED APPS / PLUGINS
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning installed apps and plugins...');
+    if (tableExists('sys_store_app')) {
+        var appGR = new GlideRecord('sys_store_app');
+        var appQ = appGR.addQuery('scope', 'CONTAINS', 'sn_uni_req');
+        appQ.addOrCondition('name', 'CONTAINS', 'Universal Request');
+        appGR.query();
+        while (appGR.next()) {
+            report.apps_plugins.push({
+                name:    appGR.name.toString(),
+                scope:   appGR.scope.toString(),
+                version: appGR.version.toString(),
+                source:  'sys_store_app'
+            });
+        }
+    }
+
+    if (tableExists('v_plugin')) {
+        var pluginGR = new GlideRecord('v_plugin');
+        var plugQ = pluginGR.addQuery('name', 'CONTAINS', 'Universal Request');
+        plugQ.addOrCondition('id', 'CONTAINS', 'sn_uni_req');
+        pluginGR.query();
+        while (pluginGR.next()) {
+            report.apps_plugins.push({
+                name:    pluginGR.name.toString(),
+                id:      pluginGR.id.toString(),
+                version: pluginGR.version.toString(),
+                active:  pluginGR.active.toString(),
+                source:  'v_plugin'
+            });
+        }
+    }
+    gs.print('✅ Apps / Plugins: ' + report.apps_plugins.length);
+
+    // ---------------------------------------------------------------
+    // 4. SCRIPT INCLUDES
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Script Includes...');
+    var siGR = new GlideRecord('sys_script_include');
+    applyUrQuery(siGR, urScopeId, 'name');
+    siGR.orderBy('name');
+    siGR.query();
+    while (siGR.next()) {
+        report.script_includes.push({
+            name:     siGR.name.toString(),
+            api_name: siGR.api_name.toString(),
+            active:   siGR.active.toString(),
+            scope:    siGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ Script Includes: ' + report.script_includes.length);
+
+    // ---------------------------------------------------------------
+    // 5. BUSINESS RULES  (table: sys_script, key field: collection)
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Business Rules...');
+    var brGR = new GlideRecord('sys_script');
+    applyUrTableQuery(brGR, urScopeId, 'collection');
+    brGR.orderBy('name');
+    brGR.query();
+    while (brGR.next()) {
+        report.business_rules.push({
+            name:   brGR.name.toString(),
+            table:  brGR.collection.toString(),
+            when:   brGR.when.toString(),
+            active: brGR.active.toString(),
+            scope:  brGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ Business Rules: ' + report.business_rules.length);
+
+    // ---------------------------------------------------------------
+    // 6. CLIENT SCRIPTS
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Client Scripts...');
+    var csGR = new GlideRecord('sys_client_script');
+    applyUrTableQuery(csGR, urScopeId, 'table');
+    csGR.orderBy('name');
+    csGR.query();
+    while (csGR.next()) {
+        report.client_scripts.push({
+            name:   csGR.name.toString(),
+            table:  csGR.table.toString(),
+            type:   csGR.type.toString(),
+            active: csGR.active.toString(),
+            scope:  csGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ Client Scripts: ' + report.client_scripts.length);
+
+    // ---------------------------------------------------------------
+    // 7. UI POLICIES
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning UI Policies...');
+    var upGR = new GlideRecord('sys_ui_policy');
+    applyUrTableQuery(upGR, urScopeId, 'table');
+    upGR.orderBy('short_description');
+    upGR.query();
+    while (upGR.next()) {
+        report.ui_policies.push({
+            name:   upGR.short_description.toString(),
+            table:  upGR.table.toString(),
+            active: upGR.active.toString(),
+            scope:  upGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ UI Policies: ' + report.ui_policies.length);
+
+    // ---------------------------------------------------------------
+    // 8. UI ACTIONS
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning UI Actions...');
+    var uaGR = new GlideRecord('sys_ui_action');
+    applyUrTableQuery(uaGR, urScopeId, 'table');
+    uaGR.orderBy('name');
+    uaGR.query();
+    while (uaGR.next()) {
+        report.ui_actions.push({
+            name:   uaGR.name.toString(),
+            table:  uaGR.table.toString(),
+            active: uaGR.active.toString(),
+            scope:  uaGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ UI Actions: ' + report.ui_actions.length);
+
+    // ---------------------------------------------------------------
+    // 9. ACCESS CONTROLS (ACLs)
+    // The 'name' column on sys_security_acl stores the pattern
+    // "<table>.<field>" so searching it for the UR table names works.
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning ACLs...');
+    var aclGR = new GlideRecord('sys_security_acl');
+    var aclQ = aclGR.addQuery('name', 'CONTAINS', 'universal_request');
+    aclQ.addOrCondition('name', 'CONTAINS', 'sn_uni_req');
+    if (urScopeId) {
+        aclQ.addOrCondition('sys_scope', urScopeId);
+    }
+    aclGR.orderBy('name');
+    aclGR.query();
+    while (aclGR.next()) {
+        report.acls.push({
+            name:      aclGR.name.toString(),
+            type:      aclGR.type.toString(),
+            operation: aclGR.operation.toString(),
+            active:    aclGR.active.toString(),
+            scope:     aclGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ ACLs: ' + report.acls.length);
+
+    // ---------------------------------------------------------------
+    // 10. FLOWS (Flow Designer)
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Flows...');
+    if (tableExists('sys_hub_flow')) {
+        var flowGR = new GlideRecord('sys_hub_flow');
+        flowGR.addQuery('flow_type', 'flow');
+        applyUrQuery(flowGR, urScopeId, 'name');
+        flowGR.orderBy('name');
+        flowGR.query();
+        while (flowGR.next()) {
+            report.flows.push({
+                name:   flowGR.name.toString(),
+                active: flowGR.active.toString(),
+                scope:  flowGR.sys_scope.getDisplayValue()
+            });
+        }
+    } else {
+        report.warnings.push('sys_hub_flow not found — Flow Designer may not be active.');
+    }
+    gs.print('✅ Flows: ' + report.flows.length);
+
+    // ---------------------------------------------------------------
+    // 11. SUBFLOWS (Flow Designer)
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Subflows...');
+    if (tableExists('sys_hub_flow')) {
+        var sfGR = new GlideRecord('sys_hub_flow');
+        sfGR.addQuery('flow_type', 'subflow');
+        applyUrQuery(sfGR, urScopeId, 'name');
+        sfGR.orderBy('name');
+        sfGR.query();
+        while (sfGR.next()) {
+            report.subflows.push({
+                name:   sfGR.name.toString(),
+                active: sfGR.active.toString(),
+                scope:  sfGR.sys_scope.getDisplayValue()
+            });
+        }
+    }
+    gs.print('✅ Subflows: ' + report.subflows.length);
+
+    // ---------------------------------------------------------------
+    // 12. FLOW ACTIONS (Flow Designer)
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Flow Actions...');
+    if (tableExists('sys_hub_action_type_definition')) {
+        var actionGR = new GlideRecord('sys_hub_action_type_definition');
+        applyUrQuery(actionGR, urScopeId, 'name');
+        actionGR.orderBy('name');
+        actionGR.query();
+        while (actionGR.next()) {
+            report.flow_actions.push({
+                name:   actionGR.name.toString(),
+                active: actionGR.active.toString(),
+                scope:  actionGR.sys_scope.getDisplayValue()
+            });
+        }
+    } else {
+        report.warnings.push('sys_hub_action_type_definition not found — Flow Actions may not be available.');
+    }
+    gs.print('✅ Flow Actions: ' + report.flow_actions.length);
+
+    // ---------------------------------------------------------------
+    // 13. CLASSIC WORKFLOWS  (table: wf_workflow)
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Classic Workflows...');
+    if (tableExists('wf_workflow')) {
+        var wfGR = new GlideRecord('wf_workflow');
+        applyUrTableQuery(wfGR, urScopeId, 'table');
+        wfGR.orderBy('name');
+        wfGR.query();
+        while (wfGR.next()) {
+            report.workflows.push({
+                name:   wfGR.name.toString(),
+                table:  wfGR.table.toString(),
+                active: wfGR.active.toString(),
+                scope:  wfGR.sys_scope.getDisplayValue()
+            });
+        }
+    } else {
+        report.warnings.push('wf_workflow not found — Classic Workflow engine may not be active.');
+    }
+    gs.print('✅ Classic Workflows: ' + report.workflows.length);
+
+    // ---------------------------------------------------------------
+    // 14. PLAYBOOKS
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Playbooks...');
+    if (tableExists('sn_playbook_experience')) {
+        var pbGR = new GlideRecord('sn_playbook_experience');
+        applyUrQuery(pbGR, urScopeId, 'name');
+        pbGR.orderBy('name');
+        pbGR.query();
+        while (pbGR.next()) {
+            report.playbooks.push({
+                name:   pbGR.name.toString(),
+                table:  pbGR.getDisplayValue('table'),
+                active: pbGR.active.toString(),
+                scope:  pbGR.sys_scope.getDisplayValue()
+            });
+        }
+    } else {
+        report.warnings.push('sn_playbook_experience not found — Playbooks plugin may not be installed.');
+    }
+    gs.print('✅ Playbooks: ' + report.playbooks.length);
+
+    // ---------------------------------------------------------------
+    // 15. NOTIFICATIONS  (table: sysevent_email_action, field: collection)
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Notifications...');
+    var notifGR = new GlideRecord('sysevent_email_action');
+    applyUrTableQuery(notifGR, urScopeId, 'collection');
+    notifGR.orderBy('name');
+    notifGR.query();
+    while (notifGR.next()) {
+        report.notifications.push({
+            name:   notifGR.name.toString(),
+            table:  notifGR.collection.toString(),
+            event:  notifGR.event_name.toString(),
+            active: notifGR.active.toString(),
+            scope:  notifGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ Notifications: ' + report.notifications.length);
+
+    // ---------------------------------------------------------------
+    // 16. INBOUND EMAIL ACTIONS
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Inbound Email Actions...');
+    if (tableExists('sys_email_inbound_action')) {
+        var ieaGR = new GlideRecord('sys_email_inbound_action');
+        applyUrTableQuery(ieaGR, urScopeId, 'table');
+        ieaGR.orderBy('name');
+        ieaGR.query();
+        while (ieaGR.next()) {
+            report.inbound_email_actions.push({
+                name:   ieaGR.name.toString(),
+                table:  ieaGR.table.toString(),
+                active: ieaGR.active.toString(),
+                scope:  ieaGR.sys_scope.getDisplayValue()
+            });
+        }
+    }
+    gs.print('✅ Inbound Email Actions: ' + report.inbound_email_actions.length);
+
+    // ---------------------------------------------------------------
+    // 17. SCHEDULED JOBS  (table: sysauto_script)
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Scheduled Jobs...');
+    var jobGR = new GlideRecord('sysauto_script');
+    applyUrQuery(jobGR, urScopeId, 'name');
+    jobGR.orderBy('name');
+    jobGR.query();
+    while (jobGR.next()) {
+        report.scheduled_jobs.push({
+            name:     jobGR.name.toString(),
+            run_type: jobGR.run.toString(),
+            active:   jobGR.active.toString(),
+            scope:    jobGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ Scheduled Jobs: ' + report.scheduled_jobs.length);
+
+    // ---------------------------------------------------------------
+    // 18. SYSTEM PROPERTIES
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning System Properties...');
+    var propGR = new GlideRecord('sys_properties');
+    var propQ = propGR.addQuery('name', 'CONTAINS', 'universal_request');
+    propQ.addOrCondition('name', 'CONTAINS', 'sn_uni_req');
+    if (urScopeId) {
+        propQ.addOrCondition('sys_scope', urScopeId);
+    }
+    propGR.orderBy('name');
+    propGR.query();
+    while (propGR.next()) {
+        report.system_properties.push({
+            name:  propGR.name.toString(),
+            value: propGR.value.toString(),
+            scope: propGR.sys_scope.getDisplayValue()
+        });
+    }
+    gs.print('✅ System Properties: ' + report.system_properties.length);
+
+    // ---------------------------------------------------------------
+    // 19. ASSIGNMENT RULES
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Assignment Rules...');
+    if (tableExists('sysrule_assignment')) {
+        var arGR = new GlideRecord('sysrule_assignment');
+        applyUrTableQuery(arGR, urScopeId, 'table');
+        arGR.orderBy('name');
+        arGR.query();
+        while (arGR.next()) {
+            report.assignment_rules.push({
+                name:   arGR.name.toString(),
+                table:  arGR.table.toString(),
+                active: arGR.active.toString(),
+                scope:  arGR.sys_scope.getDisplayValue()
+            });
+        }
+    }
+    gs.print('✅ Assignment Rules: ' + report.assignment_rules.length);
+
+    // ---------------------------------------------------------------
+    // 20. CATALOG ITEMS
+    // Catches catalog items whose name or description references UR,
+    // or that live in the UR scope.
+    // ---------------------------------------------------------------
+    gs.print('--- Scanning Catalog Items...');
+    if (tableExists('sc_cat_item')) {
+        var catGR = new GlideRecord('sc_cat_item');
+        applyUrQuery(catGR, urScopeId, 'name');
+        catGR.orderBy('name');
+        catGR.query();
+        while (catGR.next()) {
+            report.catalog_items.push({
+                name:     catGR.name.toString(),
+                active:   catGR.active.toString(),
+                category: catGR.getDisplayValue('category'),
+                scope:    catGR.sys_scope.getDisplayValue()
+            });
+        }
+    }
+    gs.print('✅ Catalog Items: ' + report.catalog_items.length);
+
+    // ---------------------------------------------------------------
+    // FINAL REPORT
+    // ---------------------------------------------------------------
+    gs.print('');
+    gs.print('================ UNIVERSAL REQUEST DEPENDENCY REPORT ================');
+    gs.print(JSON.stringify(report, null, 2));
+
+})();
